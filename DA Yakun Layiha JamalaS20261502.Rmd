@@ -1,0 +1,681 @@
+---
+title: " DA Yakun Layiha"
+author: "Jamala Safarli"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    css: style.css
+---
+
+<script>
+   $(document).ready(function() {
+     $head = $('#header');
+     $head.prepend('<img src=\"https://www.aztu.edu.az/sub_site/assets/dist/img/logo-footerr.png\" style=\"float: right;width: 300px;\"/>')
+   });
+</script>
+
+
+```{r k, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE}
+
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(readr)
+library(readxl)
+library(openxlsx)
+library(DT)
+library(DBI)
+library(RMariaDB)
+library(stringr)
+library(plotly)
+library(tidyr)
+library(scales)
+library(prophet)
+library(dygraphs)
+library(xts)
+
+
+fp_final = readRDS("fp_final.rds")
+
+first_date = min(fp_final$rec_date, na.rm = TRUE)
+last_date = max(fp_final$rec_date, na.rm = TRUE)
+setir = nrow(fp_final)
+sutun = ncol(fp_final)
+
+dir.create("prep_data", showWarnings = FALSE)
+
+
+```
+
+# Cleaning
+
+```{r, results='asis', echo=FALSE}
+library(xfun)
+
+cat("#### <i class='fa fa-code'></i> R Skriptləri\n")
+
+embed_file("umumi cleaning.R", text = "1. Ümumi Təmizləmə Prosesi")
+cat("<br>")
+embed_file("rec_cleaning.R", text = "2. REC Məlumatlarının Təmizlənməsi")
+cat("<br>")
+embed_file("map_cleaning.R", text = "3. Coğrafi Məlumatların Map olunması")
+cat("<br>")
+embed_file("join_cleaning.R", text = "4. Data Birləşdirmə (Join) Skripti")
+cat("<br>")
+embed_file("herflere gore cleaning.R", text = "5. Simvol və Hərf Standartlaşdırması")
+cat("<br>")
+embed_file("product herflere gore clean.R", text = "6. Məhsul Adlarının Təmizlənməsi")
+cat("<br>")
+embed_file("excel muqayise.R", text = "7. Excel Məlumatlarının Müqayisəsi")
+cat("<br>")
+embed_file("final_join_clean.R", text = "8. Yekun Birləşmə və Təmizləmə")
+
+cat("\n#### <i class='fa fa-file-excel'></i> Köməkçi Excel Faylları\n")
+embed_file("mehsul_saylari.xlsx", text = "9. Məhsul Sayları Cədvəli")
+cat("<br>")
+embed_file("pos_saylari.xlsx", text = "10. POS Nöqtələri Cədvəli")
+```
+
+# Deskriptiv Analiz
+
+```{r d, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+summary(fp_final)
+```
+
+>Göstərici və dəyər
+
+```{r a, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+deskriptiv_table = fp_final %>%
+  summarise(
+    `Başlanğıc Tarixi` = as.character(min(rec_date, na.rm = TRUE)),
+    `Bitmə Tarixi` = as.character(max(rec_date, na.rm = TRUE)),
+    `Ümumi Sətir Sayı` = format(n(), big.mark = ","),
+    `Median Satış (AZN)` = as.character(round(median(revenue, na.rm = TRUE), 2)),
+    `Ortalama Satış (AZN)` = as.character(round(mean(revenue, na.rm = TRUE), 2)),
+    `Median Mənfəət Marjası` = as.character(round(median(profit_margin, na.rm = TRUE), 2))
+  ) %>%
+  pivot_longer(cols = everything(), names_to = "Göstərici", values_to = "Dəyər")
+
+saveRDS(deskriptiv_table, "prep_data/deskriptiv_table.rds")
+
+deskriptiv_table = readRDS("prep_data/deskriptiv_table.rds")
+datatable(deskriptiv_table)
+```
+
+>QNT
+
+```{r a1, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+qnt_sayi = fp_final %>%
+  count(qnt) %>%
+  mutate(faiz = round((n / sum(n) * 100))) %>%
+  arrange(desc(n)) %>%
+  head(5)
+
+saveRDS(qnt_sayi, "prep_data/qnt_sayi.rds")
+
+qnt_sayi= readRDS("prep_data/qnt_sayi.rds")
+datatable(qnt_sayi)
+
+```
+
+>Kateqoriyaların Gəlir Payı
+
+```{r a2, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+category_summary = fp_final %>%
+  group_by(category) %>%
+  summarise(
+    total_rev = sum(revenue, na.rm = TRUE),
+    total_transactions = n_distinct(rec_id),
+    avg_basket = total_rev / total_transactions,
+    item_count = sum(qnt, na.rm = TRUE)) %>%
+  mutate(rev_share = (total_rev / sum(total_rev)) * 100) %>%
+  arrange(desc(total_rev))
+
+saveRDS(category_summary, "prep_data/category_summary.rds")
+
+category_summary = readRDS("prep_data/category_summary.rds")
+
+ggplot(category_summary, aes(x = reorder(category, rev_share), y = rev_share, fill = avg_basket)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  theme_minimal() +
+  labs(title = "Kategoriyalarin strateji payi",
+       x = "Kategoriya", 
+       y = "Umumi gelirde payi (%)",
+       fill = "Orta Qebz (AZN)")
+```
+
+
+**Şərh**:Qrafikdən görünür ki, gəlirin ən böyük payı (təxminən 60%-dən çoxu) supermarket və kiçik marketlər şəbəkəsinə məxsusdur, bu da gündəlik tələbat məhsullarının satışının üstünlük təşkil etdiyini göstərir. Maraqlı məqam odur ki, "Ev və Elektronika" kateqoriyası ümumi gəlirdə az yer tutsa da, ən yüksək orta qəbz məbləğinə malikdir. Bu, elektronika məhsullarının baha olması və nadir hallarda alınması ilə bağlıdır. Ümumilikdə, biznes üçün əsas gəlir həcmi marketlərdən, yüksək məbləğli tək-tək satışlar isə elektronika sektorundan gəlir.
+
+
+>Umumi Regionlar uzre Heatmap
+
+```{r a3, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+
+heatmap_unified = fp_final %>%
+  mutate(final_region = if_else(str_detect(toupper(cografim), "BAKI"), "BAKI (ÜMUMİ)", cografim)) %>%
+  group_by(final_region, category) %>%
+  summarise(rev = sum(revenue, na.rm = TRUE), .groups = 'drop') %>%
+  group_by(final_region) %>%
+  mutate(share = (rev / sum(rev)) * 100) %>%
+  group_by(final_region) %>%
+  mutate(reg_total = sum(rev)) %>%
+  ungroup() %>%
+  filter(final_region %in% head(unique(arrange(., desc(reg_total))$final_region), 19))
+
+saveRDS(heatmap_unified, "prep_data/heatmap_unified.rds")
+heatmap_unified = readRDS("prep_data/heatmap_unified.rds")
+
+ggplot(heatmap_unified, aes(x = category, y = reorder(final_region, share), fill = share)) +
+  geom_tile(color = "white", size = 0.3) +
+  scale_fill_distiller(palette = "Blues", direction = 1) + 
+  geom_text(aes(label = paste0(round(share, 0), "%")), size = 3, 
+            color = ifelse(heatmap_unified$share > 50, "white", "black")) +
+  theme_minimal() +
+  labs(title = "Azerbaycan uzre Regional Satis Matrisi",
+       x = "Mehsul kategoriyasi", 
+       y = "Region/Seher", 
+       fill = "Pay (%)") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    panel.grid = element_blank())
+
+```
+
+**Şərh**:Azərbaycanın demək olar ki, bütün regionlarında satışların əsas hissəsini Supermarket şəbəkələri təşkil edir, xüsusilə Xəzər rayonunda bu göstərici 85%-ə qədər yüksəlir. Sumqayıt regionu digərlərindən fərqlənərək Səhiyyə (Aptek) sektorunda 46%-lik çox yüksək satış payı ilə diqqət çəkir. Bakı şəhərində isə satışlar daha müxtəlifdir və burada kiçik marketlərin payı (30%) digər bölgələrə nisbətən daha qabarıq görünür. Ümumilikdə, regional satışlarda gündəlik ərzaq və aptek məhsulları aparıcı rol oynayır.
+
+
+>Baki uzre Heatmap
+
+```{r a4, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+
+baku_heatmap_green = fp_final %>%
+  filter(str_detect(toupper(cografim), "BAKI")) %>% 
+  mutate(district_name = str_remove_all(cografim, "BAKI \\(| R-NU\\)|\\)")) %>%
+  group_by(district_name, category) %>%
+  summarise(rev = sum(revenue, na.rm = TRUE), .groups = 'drop') %>%
+  group_by(district_name) %>%
+  mutate(share = (rev / sum(rev)) * 100)
+
+saveRDS(baku_heatmap_green, "prep_data/baku_heatmap_green.rds")
+
+baku_heatmap_green = readRDS("prep_data/baku_heatmap_green.rds")
+
+ggplot(baku_heatmap_green, aes(x = category, y = reorder(district_name, rev), fill = share)) +
+  geom_tile(color = "white", size = 0.3) +
+  scale_fill_gradient(low = "#e5f5e0", high = "#00441b", name = "Pay (%)") + 
+  geom_text(aes(label = paste0(round(share, 0), "%")), size = 3, 
+            color = ifelse(baku_heatmap_green$share > 50, "white", "black"), fontface = "bold") +
+  theme_minimal() +
+  labs(title = "Baki Rayonlari uzre Mehsul Matrisi",
+       x = "Mehsul Kategoriyası", 
+       y = "Baki Rayonlari") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    panel.grid = element_blank(),)
+```
+
+**Şərh**:Bakı rayonları üzrə satış matrisinə baxdıqda, demək olar ki, bütün rayonlarda "Supermarket şəbəkələri" mütləq üstünlüyə malikdir. Xüsusilə Binəqədi (96%) və Sabunçu (93%) kimi ərazilərdə satışların demək olar ki, hamısı böyük marketlərin payına düşür. Yasamal rayonu digərlərindən fərqli olaraq "Digər" kateqoriyasında 48%-lik yüksək payla diqqət çəkir. Ümumilikdə Bakı əhalisinin əsas alış-veriş vərdişləri böyük supermarket zəncirləri üzərində qurulub.
+
+
+>Qiymət Spektri
+
+```{r a5, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+price_dist = fp_final %>%
+  mutate(price_bucket = cut(unit_price, 
+                            breaks = c(0, 2, 5, 10, 20, 50, 100, 500, Inf),
+                            labels = c("0-2 AZN", "2-5 AZN", "5-10 AZN", "10-20 AZN", 
+                                       "20-50 AZN", "50-100 AZN", "100-500 AZN", "500+ AZN"),
+                            include.lowest = TRUE)) %>%
+  group_by(price_bucket) %>%
+  summarise(
+    bucket_revenue = sum(revenue, na.rm = TRUE),
+    transaction_count = n()) %>%
+  mutate(rev_share = (bucket_revenue / sum(bucket_revenue)) * 100)
+
+saveRDS(price_dist, "prep_data/price_dist.rds")
+
+price_dist = readRDS("prep_data/price_dist.rds")
+
+ggplot(price_dist, aes(x = price_bucket, y = rev_share, fill = price_bucket)) +
+  geom_col(color = "white") +
+  geom_text(aes(label = paste0(round(rev_share, 1), "%")), vjust = -0.01, fontface = "bold") +
+  scale_fill_brewer(palette = "Blues") +
+  theme_minimal() +
+  labs(title = "Qiymet Spektri",
+       x = "Mehsulun Qiymet Araligi (AZN)", 
+       y = "Gelir Payi (%)") +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Bu qrafikdən görünür ki, ən çox gəlir (təxminən 60%) 0-10 AZN aralığında olan məhsullardan əldə edilir. Bu, əhalinin əsasən gündəlik tələbat məhsullarını daha sərfəli qiymətlərlə almağa üstünlük verdiyini göstərir. 10-50 AZN aralığında olan məhsullar da müəyyən gəlir payına malikdir, lakin 50 AZN-dən yuxarı qiymət kateqoriyaları ümumi gəlirdə nisbətən az yer tutur. Bu, bazarın əsasən aşağı və orta qiymət seqmentlərinə yönəldiyini və yüksək qiymətli məhsulların satışının nisbətən məhdud olduğunu göstərir.
+
+>Brend Mağazaların Satış Performansı
+
+```{r a6, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+
+brand_final = fp_final %>%
+  filter(revenue < 50000) %>% 
+  mutate(brand = case_when(
+    str_detect(toupper(pos), "ARAZ") ~ "ARAZ MARKET",
+    str_detect(toupper(pos), "BRAVO") ~ "BRAVO",
+    str_detect(toupper(pos), "OBA") ~ "OBA MARKET",
+    str_detect(toupper(pos), "BAZARSTORE") ~ "BAZARSTORE",
+    str_detect(toupper(pos), "AL MARKET") ~ "AL MARKET",
+    str_detect(toupper(pos), "RAHAT") ~ "RAHAT",
+    str_detect(toupper(pos), "BIZIM MARKET|BIZIM MART") ~ "BİZİM MARKET",
+    str_detect(toupper(pos), "SPAR") ~ "SPAR",
+    str_detect(toupper(pos), "NEPTUN") ~ "NEPTUN",
+    str_detect(toupper(pos), "BOLMART") ~ "BOLMART",
+    TRUE ~ "DİGƏR")) %>%
+  filter(brand != "DİGƏR") %>%
+  group_by(brand) %>%
+  summarise(
+    total_rev = sum(revenue, na.rm = TRUE),
+    transactions = n(),
+    avg_basket = total_rev / transactions) %>%
+  arrange(desc(total_rev))
+
+saveRDS(brand_final, "prep_data/brand_final.rds")
+
+brand_final = readRDS("prep_data/brand_final.rds")
+
+ggplot(brand_final, aes(x = total_rev, y = reorder(brand, total_rev), fill = avg_basket)) +
+  geom_col(width = 1, color = "white", size = 0.6) +
+  geom_text(aes(label = paste0(round(total_rev/1e6, 1), " M")), 
+            hjust = -0.3, size = 3.5, fontface = "bold", color = "#333333") +
+  scale_fill_distiller(palette = "Blues", direction = 1, name = "Orta Səbət (AZN)") +
+  scale_x_continuous(
+    labels = unit_format(unit = "M", scale = 1e-6), 
+    expand = expansion(mult = c(0, 0.3))) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Brend Magazalarin Satıs Performansi",
+    y = NULL) +
+  theme(
+    axis.text.x = element_text(face = "bold", color = "grey30"),
+    axis.ticks.x = element_line(color = "grey70"),
+    axis.title.x = element_text(size = 12, margin = margin(t = 10)),
+    axis.text.y = element_text(face = "bold", color = "black", size = 11),
+    plot.title = element_text(face = "bold", size = 18, color = "#1B4F72", hjust = 0),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "grey90", linetype = "dashed"),
+    legend.position = "right")
+```
+
+
+**Şərh**:Brend mağazaların satış performansını analiz etdikdə, ARAZ MARKET ən yüksək ümumi gəlirə (təxminən 15 milyon AZN) və ən çox əməliyyat sayına (təxminən 150,000) malikdir. Bu, ARAZ MARKET-in bazarda güclü mövqeyə sahib olduğunu göstərir. Digər tərəfdən, BOLMART ən yüksək orta səbət məbləği ilə fərqlənir, bu da müştərilərin burada daha bahalı məhsullar almağa meylli olduğunu göstərir. Ümumilikdə, brend mağazalar arasında həm ümumi gəlir, həm də orta səbət məbləği baxımından əhəmiyyətli fərqliliklər mövcuddur ki, bu da müxtəlif marketinq və satış strategiyalarının tətbiqini tələb edə bilər.
+
+>Satışın İkiaylıq Trend Analizi
+
+```{r a7, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+
+clean_line_data = fp_final %>%
+  filter(rec_date >= "2024-04-19" & rec_date <= "2024-05-31") %>%
+  group_by(rec_date) %>%
+  summarise(daily_revenue = sum(revenue, na.rm = TRUE)) %>%
+  filter(daily_revenue < 10000000) %>% 
+  mutate(Ay = month(rec_date, label = TRUE, abbr = FALSE, locale = "az_AZ.UTF-8"))
+
+saveRDS(clean_line_data, "prep_data/clean_line_data.rds")
+
+clean_line_data = readRDS("prep_data/clean_line_data.rds")
+
+ggplot(clean_line_data, aes(x = rec_date, y = daily_revenue, group = 1)) +
+  geom_hline(yintercept = mean(clean_line_data$daily_revenue), 
+             linetype = "dashed", color = "grey70", size = 0.5) +
+  geom_line(aes(color = "darkblue"), size = 1.5) +
+  geom_point(aes(color = Ay), size = 3, shape = 21, fill = "white", stroke = 1.5) +
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6), 
+                     expand = expansion(mult = c(0.1, 0.2))) +
+  scale_x_date(date_labels = "%d %b", date_breaks = "5 day") +
+  scale_color_manual(values = c("aprel" = "#2980b9", "may" = "#27ae60")) +
+  
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Satisin İkiaylıq Trend Analizi",
+    x = NULL, y = "Gundelik Gelir (AZN)",
+    color = "Ay") +
+  theme(
+    plot.title = element_text(face = "bold", size = 15, color = "#2c3e50"),
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "grey95"),
+    legend.position = "bottom")
+```
+
+
+**Şərh**:Satışın ikiaylıq trendinə baxdıqda, aprel ayının sonunda və mayın ortasında satışların ən yüksək səviyyəyə (təxminən 5 milyon AZN) çatdığını görmək olar. May ayının ilk həftəsində satışlarda kəskin azalma müşahidə olunur ki, bu da həmin dövrdəki qeyri-iş günləri və ya texniki fasilələrlə bağlı ola bilər. Orta gündəlik gəlir xətti 3 milyon AZN ətrafında sabitləşsə də, ayın sonuna doğru yenidən dalğalanmalar baş verir. Ümumilikdə, satışlar sabit deyil və müəyyən dövrlərdə kəskin artım və azalmalarla xarakterizə olunur.
+
+# Anomaliyalar 
+
+>Anomaliya Növü
+
+```{r b1, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+anomaliya_table = fp_final %>%
+  summarise(
+    `Maksimum Satılan Miqdar` = format(max(qnt, na.rm = TRUE), big.mark = ","),
+    `Maksimum Vahid Qiymət (AZN)` = format(max(unit_price, na.rm = TRUE), big.mark = ","),
+    `Maksimum Qəbz Məbləği (AZN)` = format(max(revenue, na.rm = TRUE), big.mark = ","),
+    `Minimum Mənfəət Marjası` = as.character(min(profit_margin, na.rm = TRUE)),
+    `Boş (NA) Mənfəət Sayı` = format(sum(is.na(profit)), big.mark = ",")) %>%
+  pivot_longer(cols = everything(), names_to = "Anomaliya Növü", values_to = "Dəyər")
+
+saveRDS(anomaliya_table, "prep_data/anomaliya_table.rds")
+
+anomaliya_table = readRDS("prep_data/anomaliya_table.rds")
+datatable(anomaliya_table)
+```
+
+>Nəhəng satışların siyahısı
+
+```{r b3, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+whales_report = fp_final %>%
+  filter(qnt >= 1000 | revenue >= 50000) %>% 
+  select(rec_date, pos, product_name, qnt, unit_price, revenue) %>%
+  arrange(desc(qnt))
+
+saveRDS(whales_report, "prep_data/whales_report.rds")
+
+whales_report = readRDS("prep_data/whales_report.rds")
+datatable(head(whales_report, 5))
+```
+
+**Şərh**:Cədvəldəki rəqəmlərə baxdıqda ciddi məlumat xətaları və anomaliyalar açıq şəkildə görünür. Məsələn, mebel və soyuducu kimi bahalı məhsulların qiyməti cəmi 1.01 AZN qeyd olunub və miqdarları yüz minlərlə göstərilib ki, bu da real satış məntiqinə ziddir. Həmçinin, xəstəxanadan alınan avans kimi qeyri-satış əməliyyatlarının da bura daxil edilməsi datanın şəffaflığını pozur. Bu sətirlər statistik göstəriciləri süni şəkildə yüksəltdiyi üçün analiz prosesindən mütləq kənarlaşdırılmalıdır.
+
+>Qiymət intizamsızlığı
+
+```{r b4, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+price_chaos = fp_final %>%
+  group_by(product_name) %>%
+  summarise(
+    min_price = min(unit_price, na.rm = TRUE),
+    max_price = max(unit_price, na.rm = TRUE),
+    price_gap_pct = round((max_price - min_price) / min_price * 100)) %>%
+  filter(price_gap_pct > 100) %>%
+  arrange(desc(price_gap_pct))
+
+saveRDS(price_chaos, "prep_data/price_chaos.rds")
+
+price_chaos = readRDS("prep_data/price_chaos.rds")
+datatable(head(price_chaos, 5))
+```
+
+**Şərh**:Cədvəldə məhsulların minimum və maksimum qiymətləri arasında kəskin dərəcədə böyük fərqlər görünür. Sony və Mebel kimi bahalı malların bəzi sətirlərdə cəmi 1.01 AZN-ə qeyd edilməsi sistemdəki texniki xətaların və ya yanlış məlumat girişinin göstəricisidir. Qiymət fərqi faizinin (price_gap_pct) 500,000%-i keçməsi bu məlumatların statistik analiz üçün yararsız olduğunu və mütləq təmizlənməli olduğunu sübut edir. Belə kəskin sapmalar real bazar mənzərəsini və orta qiymət göstəricilərini ciddi şəkildə təhrif edir.
+
+>Mənfəət məlumatı olan və olmayan sətirlərin müqayisəsi
+
+```{r b5, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+
+na_profiling = fp_final %>%
+  summarise(
+    Mövcud = sum(!is.na(profit)),
+    Boş_NA = sum(is.na(profit))) %>%
+  tidyr::pivot_longer(
+    cols = everything(),
+    names_to = "Status",
+    values_to = "Say")
+saveRDS(na_profiling, "prep_data/na_profiling.rds")
+
+na_profiling = readRDS("prep_data/na_profiling.rds")
+
+plot_ly(
+  na_profiling,
+  labels = ~Status,
+  values = ~Say,
+  type = "pie",
+  textinfo = "label+percent",
+  marker = list(
+    colors = c("#27AE60", "#C0392B"))) %>%
+  layout(
+    title = list(
+      text = "Melumat Sefaffligi: Biz Neyi Goruruk?",
+      x = 0.5),
+    showlegend = TRUE)
+```
+
+**Şərh**:Bu diaqram göstərir ki, bazadakı mənfəət məlumatlarının 94%-dən çoxu boşdur və sistemdə görünmür. Biz satışların cəmi 5.6%-i üçün real mənfəəti hesablaya bilirik, bu da ümumi mənzərəni tam anlamağa mane olur. Belə böyük məlumat əskikliyi analizlərin dəqiqliyinə ciddi şübhə yaradır və yanlış qərarlara səbəb ola bilər. Şəffaflığı təmin etmək üçün bu boşluqların səbəbi mütləq araşdırılmalıdır.
+
+>Şirkətə ən çox zərər vuran (mənfi mənfəətli) Top 10 məhsul
+
+```{r b6, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+
+menfi_m = fp_final %>%
+  filter(profit < 0) %>% 
+  group_by(product_name, pos) %>%
+  summarise(total_loss = sum(profit, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(total_loss) %>% 
+  head(10)
+saveRDS(menfi_m, "prep_data/menfi_m.rds")
+
+menfi_m = readRDS("prep_data/menfi_m.rds")
+datatable(menfi_m)
+```
+
+**Şərh**:Cədvəldə şirkətə ən çox maliyyə zərəri vuran məhsullar və onların satıldığı mağazalar əks olunub. Göründüyü kimi, "Alça KQ" və "Dana Qiymə" məhsulları müxtəlif Bravo filiallarında mənfi mənfəət göstərərək siyahıda liderdir. Bu zərərlər məhsulların maya dəyərindən ucuz satılması, endirimlər və ya xarab olma riskləri ilə bağlı ola bilər. Biznesin səmərəliliyini artırmaq üçün bu məhsulların qiymət siyasətinə və logistikasına yenidən baxmaq vacibdir.
+
+> Aprel 19-da ən çox satılan Top 10 məhsul və mağaza
+
+```{r b7, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+
+april_19 = fp_final %>%
+  filter(rec_date == "2024-04-19") %>%
+  group_by(pos, product_name, unit_price) %>%
+  summarise(
+    total_rev = sum(revenue, na.rm = TRUE),
+    total_qnt = sum(qnt, na.rm = TRUE),
+    .groups = 'drop') %>%
+  arrange(desc(total_rev)) %>%
+  head(10)
+
+saveRDS(april_19, "prep_data/april_19.rds")
+
+april_19 = readRDS("prep_data/april_19.rds")
+datatable(april_19)
+```
+
+**Şərh**:Aprel ayının 19-da ən çox gəlir gətirən məhsullar siyahısı datadakı texniki problemləri bir daha sübut edir. Soyuducu, kondisioner və şampun kimi fərqli məhsulların hamısının qiymətinin 1.01 AZN qeyd olunması və miqdarın yüz minlərlə olması real satışı əks etdirmir. Həmçinin, xəstəxanadan alınan avansların da satış kimi siyahıya düşməsi ümumi gəlir rəqəmlərini süni şəkildə artırır. Dəqiq nəticələr almaq üçün bu cür qeyri-real sətirlər analizdən kənarlaşdırılmalıdır.
+
+
+# Proqnoz  ve Ferziyyeler
+
+> Model və Proqnoz
+
+```{r c1, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+
+df_clean = fp_final %>%
+  filter(rec_date > "2024-04-19" & rec_date <= "2024-05-31") %>%
+  filter(unit_price > 1.01) %>%
+  group_by(rec_date) %>%
+  summarise(y = sum(revenue, na.rm = TRUE)) %>%
+  filter(y > 1500000) %>% 
+  rename(ds = rec_date)
+
+m = prophet(df_clean, daily.seasonality = TRUE, weekly.seasonality = TRUE)
+future = make_future_dataframe(m, periods = 90)
+forecast = predict(m, future)
+
+data_plot = forecast %>%
+  select(ds, yhat, yhat_lower, yhat_upper)
+
+actuals = df_clean %>% select(ds, y)
+data_plot = left_join(data_plot, actuals, by = "ds")
+
+saveRDS(df_clean, "prep_data/df_clean.rds")
+saveRDS(forecast, "prep_data/forecast.rds")
+saveRDS(data_plot, "prep_data/data_plot.rds")
+
+df_clean = readRDS("prep_data/df_clean.rds")
+forecast = readRDS("prep_data/forecast.rds")
+data_plot = readRDS("prep_data/data_plot.rds")
+
+
+data_xts = xts(data_plot[,-1], order.by = data_plot$ds)
+
+
+dygraph(data_xts, main = "3 Ayliq Strateji Satis Proqnozu (İyun - Avqust)") %>%
+  dySeries("y", label = "Real Satis", drawPoints = TRUE, color = "black", strokeWidth = 0) %>%
+  dySeries(c("yhat_lower", "yhat", "yhat_upper"), label = "Proqnoz", color = "#2980b9") %>%
+  dyOptions(fillAlpha = 0.2, 
+            gridLineColor = "#ececec", 
+            axisLineColor = "#2c3e50") %>%
+  dyRangeSelector(height = 40, fillColor = "#D6EAF8") %>%
+  dyEvent("2024-05-31", "Proqnozun Baslangici", labelLoc = "bottom", strokePattern = "dashed", color = "red") %>%
+  dyAxis("y", label = "Gəlir (AZN)", 
+         valueFormatter = "function(v){return (v/1000000).toFixed(2) + ' M'}",
+         axisLabelFormatter = "function(v){return (v/1000000) + ' M'}") %>%
+  dyHighlight(highlightCircleSize = 5, 
+              highlightSeriesBackgroundAlpha = 0.2,
+              hideOnMouseOut = FALSE)
+```
+
+
+**Şərh**:Proqnozda iyun-avqust ayları ərzində uzunmüddətli bir azalma və ya artım trendi görünmür. Bu, biznesin mövcud bazar payını qoruyub saxlayacağını, lakin əlavə kampaniyalar və ya müdaxilələr olmasa, satışların təbii şəkildə eyni səviyyədə qalacağını göstərir.
+
+>Hipotez 1
+
+```{r c2, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+hypo_1 = fp_final %>%
+  mutate(
+    geo_group = if_else(
+      str_detect(toupper(cografim), "BAKI"),
+      "BAKI",
+      "REGİONLAR"
+    )
+  ) %>%
+  group_by(geo_group) %>%
+  summarise(
+    `Marja (%)` = round(mean(profit_margin, na.rm = TRUE) * 100, 1),
+    `Cəmi Gəlir (Mln)` = round(sum(revenue, na.rm = TRUE) / 1e6, 2),
+    `Orta Səbət (AZN)` = round(mean(revenue, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  filter(`Cəmi Gəlir (Mln)` >= 10) %>%
+  rename("Coğrafiya" = geo_group)
+
+saveRDS(hypo_1, "prep_data/hypo_1.rds")
+
+hypo_1 = readRDS("prep_data/hypo_1.rds")
+datatable(hypo_1)
+```
+
+**Şərh**:Bakı və regionlar arasındakı satış performansını müqayisə edir. Göründüyü kimi, ümumi gəlirin mütləq əksəriyyəti (133.4 Mln AZN) Bakıdan gəlir ki, bu da biznesin paytaxtda cəmləşdiyini göstərir. Maraqlıdır ki, satış həcmindəki böyük fərqə baxmayaraq, mənfəət marjası hər iki coğrafiyada demək olar ki, eynidir (təxminən 23%). Bakıda orta səbət məbləği (14.5 AZN) regionlara nisbətən bir qədər yüksəkdir, lakin ümumi səmərəlilik göstəriciləri hər iki zonada sabitdir.
+
+>Hipotez 2
+
+```{r c3, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+hypo_2 = fp_final %>%
+  filter(str_detect(category, "SƏH") | str_detect(category, "SUPER")) %>%
+  group_by(category) %>%
+  summarise(
+    avg_basket = round(mean(revenue, na.rm = TRUE)),
+    total_rev_mln = round(sum(revenue, na.rm = TRUE) / 1e6),
+    .groups = 'drop')
+
+saveRDS(hypo_2, "prep_data/hypo_2.rds")
+
+hypo_2 = readRDS("prep_data/hypo_2.rds")
+datatable(hypo_2)
+```
+
+**Şərh**:supermarket şəbəkələri ümumi gəlir həcminə (54 mln AZN) görə liderdir, lakin burada orta səbət məbləği cəmi 8 AZN təşkil edir. Səhiyyə (aptek) kateqoriyasında isə əksinə, gəlir daha az olsa da, bir dəfəyə edilən alış-verişin məbləği (30 AZN) xeyli yüksəkdir. Bu, insanların marketlərdən tez-tez və kiçik məbləğlərlə, apteklərdən isə daha nadir, lakin böyük məbləğlərlə alış-veriş etdiyini göstərir. Ümumilikdə, hər iki sektor biznes üçün müxtəlif gəlir modelləri ilə əhəmiyyətli rol oynayır.
+
+>Hipotez 3
+
+```{r c4, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+pareto_data = fp_final %>%
+  group_by(product_name) %>%
+  summarise(revenue = sum(revenue, na.rm = TRUE)) %>%
+  arrange(desc(revenue)) %>%
+  mutate(cum_rev = cumsum(revenue),
+         cum_pct = cum_rev / sum(revenue) * 100)
+
+saveRDS(pareto_data, "prep_data/pareto_data.rds")
+
+pareto_data = readRDS("prep_data/pareto_data.rds")
+
+top_10_pct = max(pareto_data$cum_pct[1:10])
+
+paste("Top 10 məhsul ümumi gəlirin", round(top_10_pct, 1), "%-ni təşkil edir.")
+```
+
+
+>Hipotez 4
+
+```{r c5, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+hypo_4 = fp_final %>%
+  mutate(day_of_month = day(rec_date),
+         period = case_when(
+           day_of_month <= 10 ~ "Ayın əvvəli (1-10)",
+           day_of_month >= 21 ~ "Ayın sonu (21-31)",
+           TRUE ~ "Ayın ortası"
+         )) %>%
+  filter(period != "Ayın ortası") %>%
+  group_by(period) %>%
+  summarise(avg_basket = round(mean(revenue), 2),
+            total_rev_mln = round(sum(revenue)/1e6, 2))
+
+saveRDS(hypo_4, "prep_data/hypo_4.rds")
+
+hypo_4 = readRDS("prep_data/hypo_4.rds")
+datatable(hypo_4)
+
+```
+
+**Şərh**:ayın sonu (21-31) həm ümumi gəlir, həm də orta səbət məbləği baxımından ayın əvvəlinə nisbətən kəskin üstünlüyə malikdir. Ayın sonunda 58.17 milyon AZN gəlir əldə olunduğu halda, ayın əvvəlində bu göstərici cəmi 7.58 milyondur. Orta səbət məbləğinin də ayın sonunda daha yüksək (15.14 AZN) olması insanların bu dövrdə daha böyük alış-veriş etdiyini göstərir. Bu fərq böyük ehtimalla maaşların verilməsi və ayın sonuna düşən kütləvi alış-veriş vərdişləri ilə izah oluna bilər.
+
+>Hipotez 5
+
+```{r c6, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+hypo_5 = fp_final %>%
+  mutate(segment = if_else(unit_price > 100, "Premium (>100 AZN)", "Kütləvi (<100 AZN)")) %>%
+  group_by(segment) %>%
+  summarise(
+    margin_avg = round(mean(profit_margin, na.rm = TRUE) * 100, 1),
+    total_profit_share = round(sum(profit, na.rm = TRUE) / sum(fp_final$profit, na.rm = TRUE) * 100, 1),
+    revenue_mln = round(sum(revenue)/1e6, 2))
+
+saveRDS(hypo_5, "prep_data/hypo_5.rds")
+
+hypo_5 = readRDS("prep_data/hypo_5.rds")
+datatable(hypo_5)
+```
+
+**Şərh**: şirkətin əsas mənfəət mənbəyi qiyməti 100 AZN-dən aşağı olan "Kütləvi" seqmentdir. Ümumi mənfəətin demək olar ki, hamısı (99.4%) bu məhsullardan gəlir, bahalı "Premium" məhsulların payı isə olduqca azdır. Maraqlıdır ki, hər iki seqmentdə mənfəət marjası təxminən eyni (23-24%) olsa da, satış həcmindəki kəskin fərq kütləvi bazarın biznes üçün nə qədər həlledici olduğunu sübut edir. Ümumilikdə, şirkətin dayanıqlılığı bahalı tək-tək satışlardan deyil, əlçatan məhsulların çoxsaylı satışından asılıdır.
+
+>Hipotez 6
+
+```{r c7, include=TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, eval=TRUE}
+hypo_6 = fp_final %>%
+  mutate(day_num = wday(rec_date, week_start = 1), 
+         is_weekend = if_else(day_num >= 6, "Həftəsonu", "Həftəiçi")) %>%
+  filter(str_detect(category, "SUPER") | str_detect(category, "ELEK")) %>%
+  group_by(is_weekend, category) %>%
+  summarise(daily_avg_rev = round(sum(revenue) / n_distinct(rec_date)), .groups = 'drop') %>%
+  tidyr::pivot_wider(names_from = is_weekend, values_from = daily_avg_rev)
+
+saveRDS(hypo_6, "prep_data/hypo_6.rds")
+
+hypo_6 = readRDS("prep_data/hypo_6.rds")
+datatable(hypo_6)
+```
+
+**Şərh**:həm supermarket, həm də elektronika satışları həftəiçi günlərdə həftəsonuna nisbətən daha yüksəkdir. Supermarket şəbəkələrində həftəiçi satışlar 1.4 milyon AZN-i keçərək ciddi üstünlük təşkil edir. Elektronika bölməsində də eyni trendin olması müştərilərin əsas alış-verişlərini məhz iş günlərində reallaşdırdığını göstərir. Ümumilikdə, bu rəqəmlər biznes aktivliyinin həftəiçi günlərdə pik həddə çatdığını sübut edir.
+
+# Xulase
+
+>Ümumilikdə data göstərir ki, həcmlə dəyər arasında balans əsas məsələdir.
+>Yüksək dövriyyə hər zaman yüksək dəyər demək deyil.
+>Biznes üçün əsas məsələ təkcə satış həcmi yox, səbətin keyfiyyətidir.
+>Strateji yanaşma supermarket həcmi ilə premium dəyərin balansını qorumaqdır.
+>Daha dəqiq qərarlar üçün mənfəət datası kritik əhəmiyyət daşıyır.
