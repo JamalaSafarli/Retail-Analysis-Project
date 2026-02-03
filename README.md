@@ -21,7 +21,7 @@ This project involves an end-to-end data analysis of a large-scale retail datase
 - `Analysis.Rmd`: R Markdown source for the final report.
 
 ## Live Links (Coming Soon)
-- **Live Dashboard:** [Link to ShinyApps.io]
+- **Live Dashboard:** [Link to ShinyApps.io](https://jamalasafarli.shinyapps.io/RetailAnalysisJamala/)
 - **Analysis Report:** [[Link to RPubs](https://rpubs.com/JamalaSafarli/retail-analysis-project)
 
 ---
